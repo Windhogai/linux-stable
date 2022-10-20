@@ -5,6 +5,11 @@
 
 menu "Misc devices"
 
+config LEDPWM
+	tristate "LED running light"
+	help
+	  Displays an unconfigurable led running light.
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT
@@ -465,6 +470,11 @@ config PVPANIC
 	  This driver provides support for the pvpanic device.  pvpanic is
 	  a paravirtualized device provided by QEMU; it lets a virtual machine
 	  (guest) communicate panic events to the host.
+
+config LEDPWM
+	tristate "LED running light"
+	help
+	  Displays an unconfigurable led running light.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
