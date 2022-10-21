@@ -23,20 +23,23 @@ echo "${bldred} invalid arguments, usage: ./buildScript <ModuleName> <boardIP> $
 return 1
 fi
 
-make $PATH
+make ${KMOD_PATH}
 if [ $? -ne 0 ];
 then 
 echo "${bldred}make failed -> exiting ${txtwht}"
 return 1
-else
-echo "${bldgrn}make successful ${txtwht}"
 fi
 
 echo installing ${MODULE}.ko on ${BOARD}
 scp ${LOC}${MODULE}${FILETYPE} ${BOARD}:~
-ssh ${BOARD} 'rmmod ${MODULE}'
-ssh ${BOARD} 'insmod ${MODULE}.ko'
-
-
-
+ssh ${BOARD} rmmod ${MODULE}
+ssh ${BOARD} insmod ${MODULE}.ko
+if [ $? -eq 0 ];
+then
+echo "${bldgrn}Kernel module installed ${txtwht}"
+return 0
+else
+echo "${bldred}Error: Kernel module not installed ${txtwht}"
+return 1
+fi
 
