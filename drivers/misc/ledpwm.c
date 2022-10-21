@@ -15,13 +15,16 @@
 #include <linux/timer.h>
 #include <asm/errno.h>
 
-static const uint32_t ledHighIntensity = 0x5FF;
-static const uint32_t ledLowIntensity = 0x01F;
+static uint32_t ledHighIntensity = 0x5FF;
+static uint32_t ledLowIntensity = 0x300;
+static uint32_t intensity = 0x0;
 
 static const uint32_t startAddress = 0xFF203080;
 static const uint32_t lenAddress = 0x28/4;
 static uint32_t *ledMem;
 static int direction;
+static int waitTime = 100;
+static int faster = 1;
 static uint32_t *runningLightAddress;
 static void timer_callback_wait(struct timer_list *timer);
 static void timer_callback_running_light(struct timer_list *timer);
@@ -32,7 +35,7 @@ static DEFINE_TIMER(runTimer, timer_callback_running_light);
 static void timer_callback_wait(struct timer_list *timer)
 {
 	// start running light timer
-	mod_timer(&runTimer, jiffies + msecs_to_jiffies(200));
+	mod_timer(&runTimer, jiffies + msecs_to_jiffies(waitTime));
 	// turn off leds
 	for (runningLightAddress = (uint32_t *)ledMem;
 		runningLightAddress < ledMem+lenAddress;
@@ -43,7 +46,20 @@ static void timer_callback_wait(struct timer_list *timer)
 }
 
 static void timer_callback_running_light(struct timer_list *timer)
-{
+{	
+	if(waitTime <= 10) {
+		faster = 1;
+	} else if (waitTime >= 100) {
+		faster = 0;
+	}
+	if(faster == 0) {
+		intensity += 22;
+		waitTime--;
+	}
+	else if (faster == 1) {
+		intensity -= 22;
+		waitTime++;
+	}
 	// turn of led
 	iowrite32(0x0, (void *)runningLightAddress);
     // check if runnign light is currently on a boundary address
@@ -54,12 +70,12 @@ static void timer_callback_running_light(struct timer_list *timer)
 	// move the running light depending on direction flag
 	if (direction == 1) {
 		runningLightAddress++;
-		iowrite32(ledHighIntensity, (void *)runningLightAddress);
+		iowrite32(intensity, (void *)runningLightAddress);
 	} else {
 		runningLightAddress--;
-		iowrite32(ledLowIntensity, (void *)runningLightAddress);
+		iowrite32(intensity, (void *)runningLightAddress);
 	}
-	mod_timer(&runTimer, jiffies + msecs_to_jiffies(200));
+	mod_timer(&runTimer, jiffies + msecs_to_jiffies(waitTime));
 }
 
 static int __init ledpwm_init(void)
