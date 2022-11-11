@@ -31,9 +31,9 @@ return 1
 fi
 
 echo installing ${MODULE}.ko on ${BOARD}
-scp ${LOC}${MODULE}${FILETYPE} ${BOARD}:~
+scp ${LOC}${MODULE}${FILETYPE} ${BOARD}:/lib/modules/5.4.69/kernel/drivers/
 ssh ${BOARD} rmmod ${MODULE}
-ssh ${BOARD} insmod ${MODULE}.ko
+ssh ${BOARD} modprobe ${MODULE}.ko
 if [ $? -eq 0 ];
 then
 echo "${bldgrn}Kernel module installed ${txtwht}"

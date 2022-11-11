@@ -21,70 +21,62 @@
 #include <linux/device.h>
 #include <linux/delay.h>
 
-// leds
-static uint32_t intensity;
-static const uint32_t startAddress = 0xFF203080;
-static const uint32_t ledNumber = 0x20/4;
-static const uint32_t led9 = 0xFF2030A4;
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/miscdevice.h>
+//#include <linux/dev_printk.h>
+
+#define DRIVER_NAME "LEDPWM"
+
 static const uint32_t maxLedIntensity = 2047;
-static int direction;
-static int faster;
-static int waitTime = 100;
-static uint32_t *runningLightAddress;
-static void timer_callback_wait(struct timer_list *timer);
-static void timer_callback_running_light(struct timer_list *timer);
-static DEFINE_TIMER(waitTimer, timer_callback_wait);
-static DEFINE_TIMER(runTimer, timer_callback_running_light);
 
-// char device
-struct device_data_t {
-	uint32_t *led0to7;
-	uint32_t *led9;
-	struct cdev cdev;
+//forward declaration
+static int ledpwm_probe(struct platform_device *pdev);
+static int ledpwm_remove(struct platform_device *pdev);
+
+//struct  device_id
+static const struct of_device_id
+	ledpwm_of_match[] = {
+	{ .compatible = "ldd, ledpwm", },
+	{ },
 };
-static struct device_data_t device_data;
-static dev_t device_number;
-static struct class *cdev_class;
-static struct device *cdev_device;
+MODULE_DEVICE_TABLE(of, ledpwm_of_match);
 
-// sys fs
-static struct device *sysfs_device;
+//struct led driver
+static struct platform_driver ledpwm_driver = {
+	.driver = {
+		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = of_match_ptr(ledpwm_of_match)
+	},
+	.probe = ledpwm_probe,
+	.remove = ledpwm_remove
+};
+module_platform_driver(ledpwm_driver);
 
-static ssize_t led9_off_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	uint32_t ledIntensity;
-	uint32_t value;
-	struct device_data_t *data = dev_get_drvdata(dev);
+// miscdevice
+struct ledpwm {
+	uint32_t *registers;
+	struct miscdevice misc;
+};
 
-	ledIntensity = ioread32(data->led9);
-	if (ledIntensity > 0)
-		value = 0;
-	else
-		value = 1;
-	// 48 -> offset int to ASCII
-	return scnprintf(buf, PAGE_SIZE, "%c\n", (char)(value+48));
-}
-
-static DEVICE_ATTR(led9_off, 0444, led9_off_show, NULL);
 
 static int ledPwm_open(struct inode *inode, struct file *file)
 {
-	struct device_data_t *data = container_of(inode->i_cdev,
-		struct device_data_t, cdev);
-
-	file->private_data = data;
-	pr_info("In %s", __func__);
+	pr_info("opening ledpwm");
 	return 0;
 }
 
 static ssize_t ledPwm_read(struct file *filep, char __user *buf,
 	size_t count, loff_t *offp)
 {
-	struct device_data_t *data = filep->private_data;
+
+	unsigned long ret;
+	struct ledpwm *ledpwm;
 	unsigned int ledIntensity;
 	uint8_t ledIntPercent;
-	unsigned long ret;
+
+	ledpwm = container_of(filep->private_data, struct ledpwm, misc);
 
 	if (buf == NULL) {
 		pr_err("Invalid buffer");
@@ -99,7 +91,7 @@ static ssize_t ledPwm_read(struct file *filep, char __user *buf,
 	if (count < 1)
 		return -ETOOSMALL;
 
-	ledIntensity = ioread32(data->led9);
+	ledIntensity = ioread32(ledpwm->registers);
 	ledIntPercent = (uint8_t)(100 * ledIntensity / maxLedIntensity);
 	ret = copy_to_user(buf, &ledIntPercent, 1);
 	if (ret) {
@@ -117,8 +109,10 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 	int i;
 	uint32_t res;
 	uint8_t kBuf[100];
-	struct device_data_t *data = filep->private_data;
+	struct ledpwm *ledpwm;
 
+	ledpwm = container_of(filep->private_data, struct ledpwm, misc);
+	
 	if (count > 100) {
 		pr_err("Input overflow");
 		return -EINVAL;
@@ -127,13 +121,14 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 		pr_err("Invalid buffer");
 		return -EINVAL;
 	}
+
 	ret = copy_from_user(kBuf, buf, count);
 	if (ret) {
 		pr_err("Invalid input data");
 		return ret;
 	}
-	// count - 1 -> discard lf character
-	for (i = 0; i < count-1; i++) {
+	
+	for (i = 0; i < count; i++) {
 		// discard input values > 100
 		if (kBuf[i] <= 100) {
 			res = (uint32_t)((kBuf[i]) * maxLedIntensity / 100);
@@ -143,7 +138,7 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 				res = 0;
 			else
 				res += 1; // compensate rounding error
-			iowrite32(res, (void *)data->led9);
+			iowrite32(res, (void *)ledpwm->registers);
 			pr_info("set led 9 to %i", res);
 			msleep(200);
 		} else {
@@ -160,216 +155,70 @@ static const struct file_operations fops = {
 	.write = ledPwm_write,
 };
 
-// Timer callbacks
 
-static void timer_callback_wait(struct timer_list *timer)
+static int ledpwm_probe(struct platform_device *pdev)
 {
-	// start running light timer
-	mod_timer(&runTimer, jiffies + msecs_to_jiffies(waitTime));
-	// turn off leds
-	for (runningLightAddress = (uint32_t *)device_data.led0to7;
-		runningLightAddress < device_data.led0to7+ledNumber;
-		runningLightAddress++)
-		iowrite32(0x000, (void *)runningLightAddress);
-
-	runningLightAddress = device_data.led0to7;
-}
-
-static void timer_callback_running_light(struct timer_list *timer)
-{
-	if (waitTime <= 10)
-		faster = 1;
-	else if (waitTime >= 100)
-		faster = 0;
-	if (faster == 0) {
-		intensity += 22;
-		waitTime--;
-	} else if (faster == 1) {
-		intensity -= 22;
-		waitTime++;
-	}
-	// turn Led off
-	iowrite32(0x0, (void *)runningLightAddress);
-	// check if runnign light is currently on a boundary address
-	if (runningLightAddress >= device_data.led0to7+ledNumber-1)
-		direction = 0;
-	else if (runningLightAddress <= device_data.led0to7)
-		direction = 1;
-	// move the running light depending on direction flag
-	if (direction == 1) {
-		runningLightAddress++;
-		iowrite32(intensity, (void *)runningLightAddress);
-	} else {
-		runningLightAddress--;
-		iowrite32(intensity, (void *)runningLightAddress);
-	}
-	mod_timer(&runTimer, jiffies + msecs_to_jiffies(waitTime));
-}
-
-
-static int __init ledpwm_init(void)
-{
-	struct resource *retVal;
-	uint32_t *addressPtr;
 	int status;
+	struct resource *io;
+	static atomic_t ledpwm_no = ATOMIC_INIT(-1);
+	int no = atomic_inc_return(&ledpwm_no);
+	struct ledpwm *ledpwm;
 
-	pr_info("In ledPwm_init");
+	dev_info(&pdev->dev, "In ledPwm_probe\n");
 
-	// initialize leds
-
-	direction = 0;
-	mod_timer(&waitTimer, jiffies + msecs_to_jiffies(3000));
-
-	retVal = request_mem_region(startAddress, ledNumber*4, "LED0-7");
-	if (retVal == NULL) {
-		pr_err("I/O-memory region already occupied");
-		status = -EBUSY;
+	// alloc ressources
+	ledpwm = devm_kzalloc(&pdev->dev, sizeof(*ledpwm),
+										GFP_KERNEL);
+	if (ledpwm == NULL) {
+		status = -ENOMEM;
 		goto exit;
-	}
-	// remap to virtual memory
-	device_data.led0to7 = (uint32_t *)ioremap(startAddress, ledNumber*4);
-	if (device_data.led0to7 == NULL) {
-		pr_err("ioremap failed");
+	}									
+	platform_set_drvdata(pdev, ledpwm);
+	io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (io == NULL) {
 		status = -ENOMEM;
-		goto release_memory;
+		goto reset_drvdata;
 	}
 
-	retVal = request_mem_region(led9, 4, "LED9");
-	if (retVal == NULL) {
-		pr_err("I/O-memory for LED9 already occupied");
-		status = -EBUSY;
-		goto remove_leds_0_to_7;
-	}
-
-	device_data.led9 = (uint32_t *)ioremap(led9, 4);
-	if (device_data.led9 == NULL) {
-		pr_err("ioremap LED9 failed");
+	ledpwm->registers = devm_ioremap_resource(&pdev->dev, io);
+	if (ledpwm->registers == NULL) {
 		status = -ENOMEM;
-		goto release_led9_memory;
+		goto reset_drvdata;
 	}
 
-	// turn on all leds
-	for (addressPtr = (uint32_t *)device_data.led0to7;
-		addressPtr < device_data.led0to7+ledNumber;
-		addressPtr++)
-		iowrite32(0x7FF, (void *)addressPtr);
+	snprintf(ledpwm->misc.name, sizeof(ledpwm->misc.name), "ledpwm%i", no);
+	//ledpwm->misc.name = "ledpwm";
+	ledpwm->misc.minor = MISC_DYNAMIC_MINOR;
+	ledpwm->misc.fops = &fops;
+	ledpwm->misc.parent = &pdev->dev;
+	status = misc_register(&ledpwm->misc);
 
-	// initialize character device
-
-	// allocate character device
-	status = alloc_chrdev_region(&device_number, 0, 1, "ledPwm");
-	if (status < 0) {
-		pr_info("Unable to allocate chardev region");
-		goto release_all_led;
+	if (status != 0)
+	{
+		goto reset_drvdata;
 	}
 
-	// init structure
-	cdev_init(&device_data.cdev, &fops);
-	device_data.cdev.owner = THIS_MODULE;
-
-	// and add device
-	status = cdev_add(&device_data.cdev, device_number, 1);
-	if (status < 0) {
-		pr_info("Unable to add cdev");
-		goto release_chardev;
-	}
-
-	// create device file
-	cdev_class = class_create(THIS_MODULE, "ldd5");
-	if (IS_ERR(cdev_class)) {
-		pr_info("Unable to create class");
-		status = -EEXIST;
-		goto remove_device;
-	}
-
-	cdev_device = device_create(cdev_class, NULL, device_number,
-		&device_data, "ledPwm");
-	if (IS_ERR(cdev_device)) {
-		pr_info("Unable to create device");
-		status = -EEXIST;
-		goto remove_device_class;
-	}
-
-	// initialize sysfs device
-
-	sysfs_device = root_device_register("ledPwmFs");
-	if (IS_ERR(sysfs_device)) {
-		pr_err("Unable to create sysfs device");
-		status = -EEXIST;
-		goto remove_device_class;
-	}
-	dev_set_drvdata(sysfs_device, &device_data);
-	status = sysfs_create_file(&sysfs_device->kobj,
-		&dev_attr_led9_off.attr);
-	if (status != 0) {
-		pr_err("Unable to create sysfs file");
-		goto unregister_device;
-	}
 	// everything okay
 	return 0;
 
-unregister_device:
-	root_device_unregister(sysfs_device);
-remove_device_class:
-	class_destroy(cdev_class);
-remove_device:
-	cdev_del(&device_data.cdev);
-release_chardev:
-	unregister_chrdev_region(device_number, 1);
-release_all_led:
-	iounmap(device_data.led9);
-release_led9_memory:
-	release_mem_region(led9, 4);
-remove_leds_0_to_7:
-	iounmap(device_data.led0to7);
-release_memory:
-	release_mem_region(startAddress, ledNumber*4);
+reset_drvdata:
+	ledpwm = platform_get_drvdata(pdev);
+	platform_set_drvdata(pdev, NULL);
 exit:
 	return status;
 }
 
-static void __exit ledpwm_exit(void)
+static int ledpwm_remove(struct platform_device *pdev)
 {
-	uint32_t *addressPtr;
-
-	pr_info("In ledPwm_exit");
-	// remove sysfs file
-	sysfs_remove_file(&sysfs_device->kobj, &dev_attr_led9_off.attr);
-	// remove sysfs device
-	root_device_unregister(sysfs_device);
-
-	// remove device file
-	device_destroy(cdev_class, device_number);
-	class_destroy(cdev_class);
-
-	// release resources
-	cdev_del(&device_data.cdev);
-	unregister_chrdev_region(device_number, 1);
-
-	del_timer_sync(&waitTimer);
-	del_timer_sync(&runTimer);
-
-	// turn leds off
-	for (addressPtr = device_data.led0to7;
-		addressPtr < device_data.led0to7+ledNumber;
-		addressPtr++)
-		iowrite32(0x0, (void *)addressPtr);
-
-	// unmap virtual memory
-	iounmap(device_data.led0to7);
-	// release I/O-memory region
-	release_mem_region(startAddress, ledNumber*4);
-
-	// unmap virtual memory
-	iounmap(device_data.led9);
-	// release I/O-memory region
-	release_mem_region(led9, 4);
+	struct ledpwm *ledpwm;
+	ledpwm = platform_get_drvdata(pdev);
+	misc_deregister(&ledpwm->misc);
+	platform_set_drvdata(pdev, NULL);
+	return 0;
 }
 
-module_init(ledpwm_init);
-module_exit(ledpwm_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("displays a running light (leds 0-7) + pwm controls led 9");
+MODULE_DESCRIPTION("device tree and platform devices");
 MODULE_AUTHOR("Lukas Schmalzer <lukas.schmalzer@gmail.com>");
 MODULE_AUTHOR("Maximilian Bauernfeind <s2020306047@fhooe.at>");
