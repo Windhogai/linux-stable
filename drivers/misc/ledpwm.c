@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* LDD5 Uebung02
+/* LDD5 Uebung03
  *
  * Bauernfeind, Schmalzer
- * led running light with character device
+ * led pwm, device tree and platform deivce 
  */
 
 #include <linux/module.h>
@@ -11,20 +11,16 @@
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/io.h>
-#include <linux/jiffies.h>
-#include <linux/timer.h>
 #include <asm/errno.h>
 #include <linux/stat.h>
 #include <linux/fs.h>
-#include <linux/cdev.h>
 #include <linux/uaccess.h>
-#include <linux/device.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/miscdevice.h>
-//#include <linux/dev_printk.h>
 
 #define DRIVER_NAME "LEDPWM"
 
@@ -55,28 +51,21 @@ static struct platform_driver ledpwm_driver = {
 module_platform_driver(ledpwm_driver);
 
 // miscdevice
-struct ledpwm {
+struct ledpwm_t {
 	uint32_t *registers;
 	struct miscdevice misc;
 };
-
-
-static int ledPwm_open(struct inode *inode, struct file *file)
-{
-	pr_info("opening ledpwm");
-	return 0;
-}
 
 static ssize_t ledPwm_read(struct file *filep, char __user *buf,
 	size_t count, loff_t *offp)
 {
 
 	unsigned long ret;
-	struct ledpwm *ledpwm;
+	struct ledpwm_t *ledpwm;
 	unsigned int ledIntensity;
 	uint8_t ledIntPercent;
 
-	ledpwm = container_of(filep->private_data, struct ledpwm, misc);
+	ledpwm = container_of(filep->private_data, struct ledpwm_t, misc);
 
 	if (buf == NULL) {
 		pr_err("Invalid buffer");
@@ -109,9 +98,9 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 	int i;
 	uint32_t res;
 	uint8_t kBuf[100];
-	struct ledpwm *ledpwm;
-
-	ledpwm = container_of(filep->private_data, struct ledpwm, misc);
+	struct ledpwm_t *ledpwm;
+	
+	ledpwm = container_of(filep->private_data, struct ledpwm_t, misc);
 	
 	if (count > 100) {
 		pr_err("Input overflow");
@@ -150,7 +139,6 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 }
 
 static const struct file_operations fops = {
-	.open = ledPwm_open,
 	.read = ledPwm_read,
 	.write = ledPwm_write,
 };
@@ -160,17 +148,19 @@ static int ledpwm_probe(struct platform_device *pdev)
 {
 	int status;
 	struct resource *io;
+	struct ledpwm_t *ledpwm;
 	static atomic_t ledpwm_no = ATOMIC_INIT(-1);
 	int no = atomic_inc_return(&ledpwm_no);
-	struct ledpwm *ledpwm;
+	
 
 	dev_info(&pdev->dev, "In ledPwm_probe\n");
 
 	// alloc ressources
 	ledpwm = devm_kzalloc(&pdev->dev, sizeof(*ledpwm),
-										GFP_KERNEL);
+						GFP_KERNEL);
 	if (ledpwm == NULL) {
 		status = -ENOMEM;
+		dev_err(&pdev->dev, "Error in kzalloc");
 		goto exit;
 	}									
 	platform_set_drvdata(pdev, ledpwm);
@@ -183,18 +173,22 @@ static int ledpwm_probe(struct platform_device *pdev)
 	ledpwm->registers = devm_ioremap_resource(&pdev->dev, io);
 	if (ledpwm->registers == NULL) {
 		status = -ENOMEM;
+		dev_err(&pdev->dev, "Error in ioremap");
 		goto reset_drvdata;
 	}
 
-	snprintf(ledpwm->misc.name, sizeof(ledpwm->misc.name), "ledpwm%i", no);
-	//ledpwm->misc.name = "ledpwm";
+	snprintf(ledpwm->misc.name, sizeof(ledpwm->misc.name), ("ledpwm%d"), no);
+	ledpwm->misc.name = "ledpwm";
 	ledpwm->misc.minor = MISC_DYNAMIC_MINOR;
 	ledpwm->misc.fops = &fops;
 	ledpwm->misc.parent = &pdev->dev;
 	status = misc_register(&ledpwm->misc);
 
+	iowrite32(0x7FF, ledpwm->registers);
+
 	if (status != 0)
 	{
+		dev_err(&pdev->dev, "Error in misc_registers");
 		goto reset_drvdata;
 	}
 
@@ -210,7 +204,7 @@ exit:
 
 static int ledpwm_remove(struct platform_device *pdev)
 {
-	struct ledpwm *ledpwm;
+	struct ledpwm_t *ledpwm;
 	ledpwm = platform_get_drvdata(pdev);
 	misc_deregister(&ledpwm->misc);
 	platform_set_drvdata(pdev, NULL);
