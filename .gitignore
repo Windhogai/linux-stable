@@ -146,3 +146,8 @@ x509.genkey
 
 # Clang's compilation database file
 /compile_commands.json
+
+# Custom changes for LDD5
+home/ldd/linux-stable/drivers/misc/Kconfig
+home/ldd/linux-stable/drivers/misc/Makefile
+
