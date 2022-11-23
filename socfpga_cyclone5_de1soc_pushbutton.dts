@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/* LDD5 Uebung04
+ *
+ * Bauernfeind, Schmalzer
+ * button device tree file
+ */
+#include "socfpga_cyclone5_de1soc.dts"
+/ {
+	soc {
+        keys: keys@ff200050 {
+            compatible = "ldd,pushbutton"
+            reg = <ff200050 0x1>
+            interrupts = <0x0 0x29 0x1>
+        }
+	};
+};
