@@ -12,48 +12,21 @@
 #include <linux/ioport.h>
 #include <linux/io.h>
 #include <asm/errno.h>
-#include <linux/stat.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/delay.h>
-#include <linux/device.h>
-
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/miscdevice.h>
 
-#define DRIVER_NAME "LEDPWM"
 
 static const uint32_t maxLedIntensity = 2047;
-
-//forward declaration
-static int ledpwm_probe(struct platform_device *pdev);
-static int ledpwm_remove(struct platform_device *pdev);
-
-//struct  device_id
-static const struct of_device_id
-	ledpwm_of_match[] = {
-	{ .compatible = "ldd, ledpwm", },
-	{ },
-};
-MODULE_DEVICE_TABLE(of, ledpwm_of_match);
-
-//struct led driver
-static struct platform_driver ledpwm_driver = {
-	.driver = {
-		.name = DRIVER_NAME,
-		.owner = THIS_MODULE,
-		.of_match_table = of_match_ptr(ledpwm_of_match)
-	},
-	.probe = ledpwm_probe,
-	.remove = ledpwm_remove
-};
-module_platform_driver(ledpwm_driver);
 
 // miscdevice
 struct ledpwm_t {
 	uint32_t *registers;
 	struct miscdevice misc;
+	struct platform_device *pdev;
 };
 
 static ssize_t ledPwm_read(struct file *filep, char __user *buf,
@@ -67,8 +40,10 @@ static ssize_t ledPwm_read(struct file *filep, char __user *buf,
 
 	ledpwm = container_of(filep->private_data, struct ledpwm_t, misc);
 
+	dev_info(&ledpwm->pdev->dev, "in read\n");
+
 	if (buf == NULL) {
-		pr_err("Invalid buffer");
+		dev_err(&ledpwm->pdev->dev, "Invalid buffer\n");
 		return -EINVAL;
 	}
 
@@ -84,7 +59,7 @@ static ssize_t ledPwm_read(struct file *filep, char __user *buf,
 	ledIntPercent = (uint8_t)(100 * ledIntensity / maxLedIntensity);
 	ret = copy_to_user(buf, &ledIntPercent, 1);
 	if (ret) {
-		pr_err("Invalid input data");
+		dev_err(&ledpwm->pdev->dev, "Invalid input data\n");
 		return ret;
 	}
 	*offp += 1;
@@ -103,17 +78,17 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 	ledpwm = container_of(filep->private_data, struct ledpwm_t, misc);
 	
 	if (count > 100) {
-		pr_err("Input overflow");
+		dev_err(&ledpwm->pdev->dev, "Input overflow\n");
 		return -EINVAL;
 	}
 	if (buf == NULL) {
-		pr_err("Invalid buffer");
+		dev_err(&ledpwm->pdev->dev, "Invalid buffer\n");
 		return -EINVAL;
 	}
 
 	ret = copy_from_user(kBuf, buf, count);
 	if (ret) {
-		pr_err("Invalid input data");
+		dev_err(&ledpwm->pdev->dev, "Invalid input data\n");
 		return ret;
 	}
 	
@@ -128,10 +103,10 @@ static ssize_t ledPwm_write(struct file *filep, const char __user *buf,
 			else
 				res += 1; // compensate rounding error
 			iowrite32(res, (void *)ledpwm->registers);
-			pr_info("set led 9 to %i", res);
+			dev_info(&ledpwm->pdev->dev, "set led to %i\n", res);
 			msleep(200);
 		} else {
-			pr_err("Invalid value");
+			dev_err(&ledpwm->pdev->dev, "Invalid value\n");
 		}
 	}
 	*offp = count;
@@ -150,10 +125,8 @@ static int ledpwm_probe(struct platform_device *pdev)
 	struct resource *io;
 	struct ledpwm_t *ledpwm;
 	static atomic_t ledpwm_no = ATOMIC_INIT(-1);
+	char buf[10];
 	int no = atomic_inc_return(&ledpwm_no);
-	
-
-	dev_info(&pdev->dev, "In ledPwm_probe\n");
 
 	// alloc ressources
 	ledpwm = devm_kzalloc(&pdev->dev, sizeof(*ledpwm),
@@ -166,25 +139,28 @@ static int ledpwm_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, ledpwm);
 	io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (io == NULL) {
-		status = -ENOMEM;
+		status = -EFAULT;
 		goto reset_drvdata;
 	}
 
 	ledpwm->registers = devm_ioremap_resource(&pdev->dev, io);
 	if (ledpwm->registers == NULL) {
-		status = -ENOMEM;
+		status = -EFAULT;
 		dev_err(&pdev->dev, "Error in ioremap");
 		goto reset_drvdata;
 	}
 
-	snprintf(ledpwm->misc.name, sizeof(ledpwm->misc.name), ("ledpwm%d"), no);
-	ledpwm->misc.name = "ledpwm";
+	ledpwm->pdev = pdev;
+
+	snprintf(buf, 10, "ledpwm%d", no);
+	ledpwm->misc.name = buf;
 	ledpwm->misc.minor = MISC_DYNAMIC_MINOR;
 	ledpwm->misc.fops = &fops;
 	ledpwm->misc.parent = &pdev->dev;
 	status = misc_register(&ledpwm->misc);
 
-	iowrite32(0x7FF, ledpwm->registers);
+	// turn off all leds
+	iowrite32(0x0, ledpwm->registers);
 
 	if (status != 0)
 	{
@@ -205,12 +181,36 @@ exit:
 static int ledpwm_remove(struct platform_device *pdev)
 {
 	struct ledpwm_t *ledpwm;
+
 	ledpwm = platform_get_drvdata(pdev);
+
+	// turn off all leds
+	iowrite32(0x0, ledpwm->registers);
+	
 	misc_deregister(&ledpwm->misc);
 	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
+//struct  device_id
+static const struct of_device_id
+	ledpwm_of_match[] = {
+	{ .compatible = "ldd,ledpwm", },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, ledpwm_of_match);
+
+//struct led driver
+static struct platform_driver ledpwm_driver = {
+	.driver = {
+		.name = "LEDPWM",
+		.owner = THIS_MODULE,
+		.of_match_table = of_match_ptr(ledpwm_of_match)
+	},
+	.probe = ledpwm_probe,
+	.remove = ledpwm_remove
+};
+module_platform_driver(ledpwm_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("device tree and platform devices");

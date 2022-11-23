@@ -469,10 +469,7 @@ config PVPANIC
 config LEDPWM
 	tristate "led pwm control"
 	help
-	  This driver displays a running light on LED 0 to 7 and lets
-	  the user control LED 9 with a character device in /dev.
-	  Additionally the status of LED 9 can be obtained via a sysfs
-	  device called ledPwmFs.
+	  This initalizes led0-9 and provides a /dev device.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
