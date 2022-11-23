@@ -24,18 +24,22 @@
 #include <linux/interrupt.h>
 #include <linux/kfifo.h>
 
-static int FIFO_SIZE = 8;
+#define CHARDEV_NAME_LEN 20
+#define  FIFO_SIZE 8
 
-struct pushbuttonRegister_t {
-	uint32_t *data;
+static const int NO_OF_REGS = 3;
+static const char CHARDEV_NAME[] = "pushbuttonTest";
+
+struct pushbuttonRegisters_t {
+	uint32_t *dataRegister;
 	uint32_t *unused;
-	uint32_t *interruptMask;
-	uint32_t *edgeCaputre;
+	uint32_t *intrptMaskRegister;
+	uint32_t *edgeCaptureRegister;
 };
 
 // miscdevice
 struct pushbutton_t {
-	struct pushbuttonRegister_t reg;
+	struct pushbuttonRegisters_t pushbutton;
 	struct miscdevice misc;
 	struct platform_device *pdev;
 	struct kfifo fifo;
@@ -47,15 +51,16 @@ static irqreturn_t pushbutton_irq_handler(int irq, void *data) {
 	//TODO check interrupt number
 	struct pushbutton_t *privateData = (struct pushbutton_t *)data;
 	uint32_t dataRegisterContent;
-	
-	dev_info(&privateData->pdev->dev, "in interrupt\n");
 
-	dataRegisterContent = ioread32(privateData->reg.data);
+	dataRegisterContent = ioread32(privateData->pushbutton.edgeCaptureRegister);
 	if(!kfifo_is_full(&privateData->fifo))
 		kfifo_in_spinlocked(&privateData->fifo, &dataRegisterContent, 
 		1, &privateData->lock);
 	else
 		dev_warn(&privateData->pdev->dev, "kfifo is full\n");
+
+	dev_info(&privateData->pdev->dev, "edgeCapture: %d\n", ioread32(privateData->pushbutton.edgeCaptureRegister));
+	iowrite32(0xf, privateData->pushbutton.edgeCaptureRegister);	
 	return IRQ_HANDLED;
 }
 
@@ -65,6 +70,7 @@ static ssize_t pushbutton_open(struct inode *inode, struct file *filep) {
 	if (mutex_lock_interruptible(&privateData->mutex)) {
 		dev_warn(&privateData->pdev->dev, "pushbutton open() interrupted\n");
 	}
+	//TODO delete fifo content?
 	return 0;
 }
 
@@ -79,35 +85,54 @@ static ssize_t pushbutton_read(struct file *filep, char __user *buf,
 	size_t count, loff_t *offp)
 {
 	unsigned long flags;
+	unsigned int fifoLen;
 	unsigned int copiedBytes;
-	struct pushbutton_t *pushbutton;
-	pushbutton = container_of(filep->private_data, struct pushbutton_t, misc);
+	struct pushbutton_t *privateData;
+	privateData = container_of(filep->private_data, struct pushbutton_t, misc);
 
-	dev_info(&pushbutton->pdev->dev, "in read\n");
+	dev_info(&privateData->pdev->dev, "entering read...\n");
+
+	/* do 
+	{
+		spin_lock_irqsave(&privateData->lock, flags);
+		fifoLen = kfifo_len(&privateData->fifo);
+		spin_unlock_irqrestore(&privateData->lock, flags);
+		if(fifoLen == 0)
+			dev_info(&privateData->pdev->dev, "fifo is empty\n");
+	} while ((fifoLen == 0)); */
 
 	// end of file
-	if (*offp >= 1)
+	if (*offp > kfifo_len(&privateData->fifo))
 		return 0;
+
+	dev_info(&privateData->pdev->dev, "count %d\n", count);
 
 	// small buffers
 	if (count < FIFO_SIZE)
 		return -ETOOSMALL;
 
+	
 	// wait for at least one button press
-	// while(kfifo_is_empty(&pushbutton->fifo));
+	// while(kfifo_is_empty(&privateData->fifo));
 
-	spin_lock_irqsave(&pushbutton->lock, flags);
-	// if(!kfifo_out_spinlocked(&pushbutton->fifo, buf, FIFO_SIZE, &pushbutton->fifo))
-	if(kfifo_to_user(&pushbutton->fifo, buf, FIFO_SIZE, &copiedBytes)) {
-		dev_warn(&pushbutton->pdev->dev, "Error in kfifo_to_user\n");
+	/* kfifo_out_spinlocked(&privateData->fifo, kBuffer, FIFO_SIZE, &privateData->lock);
+	copy_to_user(buf, kBuffer, FIFO_SIZE);*/
+	dev_info(&privateData->pdev->dev, "fifo len: %i\n", kfifo_len(&privateData->fifo));
+	spin_lock_irqsave(&privateData->lock, flags);
+	// if(!kfifo_out_spinlocked(&privateData->fifo, buf, FIFO_SIZE, &privateData->fifo))
+	if(kfifo_to_user(&privateData->fifo, buf, 1, &copiedBytes)) {
+		dev_warn(&privateData->pdev->dev, "Error in kfifo_to_user\n");
 	}
 	else {
 		*offp += (loff_t) copiedBytes;
-		dev_info(&pushbutton->pdev->dev, "copied %d bytes\n", copiedBytes);
+		dev_info(&privateData->pdev->dev, "copied %d bytes\n", copiedBytes);
 	}
 	// delete content of reset
-	kfifo_reset(&pushbutton->fifo);
-	spin_unlock_irqrestore(&pushbutton->lock, flags);
+	//kfifo_reset(&privateData->fifo);
+	spin_unlock_irqrestore(&privateData->lock, flags);
+
+
+
 	*offp = 1;
 	return 1;
 }
@@ -121,29 +146,28 @@ static const struct file_operations fops = {
 static int pushbutton_probe(struct platform_device *pdev)
 {
 	int status;
-	struct resource *io = 0x1;
-	struct resource * ressourceArray[5];
-	struct pushbutton_t *pushbutton;
+	struct resource * resources[3];
+	struct pushbutton_t *privateData;
 	static atomic_t pushbutton_no = ATOMIC_INIT(-1);
-	char buf[15];
+	char charDevName[CHARDEV_NAME_LEN];
 	int irq;
-	int i;
+	int index;
 	int no = atomic_inc_return(&pushbutton_no);
 
 	// alloc ressources
-	pushbutton = devm_kzalloc(&pdev->dev, sizeof(*pushbutton),
+	privateData = devm_kzalloc(&pdev->dev, sizeof(*privateData),
 						GFP_KERNEL);
-	if (pushbutton == NULL) {
+	if (privateData == NULL) {
 		status = -ENOMEM;
 		dev_err(&pdev->dev, "Error in kzalloc");
 		goto exit;
 	}		
 	// initialize char device access mutex und spin lock
-	mutex_init(&pushbutton->mutex);
-	spin_lock_init(&pushbutton->lock);
+	mutex_init(&privateData->mutex);
+	spin_lock_init(&privateData->lock);
 
 	// allocate fifo
-	if (kfifo_alloc(&pushbutton->fifo, FIFO_SIZE, GFP_KERNEL)) {
+	if (kfifo_alloc(&privateData->fifo, FIFO_SIZE, GFP_KERNEL)) {
 		status = -ENOMEM;
 		dev_err(&pdev->dev, "Error in kfifo_alloc");
 		goto exit;
@@ -156,60 +180,62 @@ static int pushbutton_probe(struct platform_device *pdev)
 		goto free_kfifo;
 	}
 	dev_info(&pdev->dev, "interrupt irq %i", irq);
-
+	
 	status = devm_request_irq(&pdev->dev,irq, pushbutton_irq_handler,
-	0, dev_name(&pdev->dev), pushbutton);
+	0, dev_name(&pdev->dev), privateData);
+	dev_info(&pdev->dev, "num resource3\n");
 	if(status < 0) {
 		dev_err(&pdev->dev, "Error in devm_request_irq");
 		goto free_kfifo;
 	}
-
-	platform_set_drvdata(pdev, pushbutton);
-
-	dev_info(&pdev->dev, "num resources: %i", pdev->num_resources);
 	
-	for(i = 0; i < pdev->num_resources; i++) {
-		dev_info(&pdev->dev, "resource %i: %u", i, pdev->resource[i]);
+	platform_set_drvdata(pdev, privateData);
+	
+	// data register
+	resources[0] = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	// interrupt mask register
+	resources[1] = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+	// edge capture register
+	resources[2] = platform_get_resource(pdev, IORESOURCE_MEM, 3);
+
+	for(index = 0; index < NO_OF_REGS; index++) {
+		dev_info(&pdev->dev, "resource  %i: 0x%08x", index, resources[index]->start);
+		if (resources[index] == NULL) {
+			status = -EFAULT;
+			dev_err(&pdev->dev, "Error in platform_get_resource");
+			goto reset_drvdata;
+		}
 	}
 
-	i = 0;
-	while (io != NULL)
-	{
-		ressourceArray[i] = platform_get_resource(pdev, IORESOURCE_MEM, i);
-		i++;
-	}
+	privateData->pushbutton.dataRegister = 
+		devm_ioremap_resource(&pdev->dev, resources[0]);
+	privateData->pushbutton.intrptMaskRegister = 
+		devm_ioremap_resource(&pdev->dev, resources[1]);
+	privateData->pushbutton.edgeCaptureRegister = 
+		devm_ioremap_resource(&pdev->dev, resources[2]);
 
-	/*
-	if (io == NULL) {
-		status = -EFAULT;
-		goto reset_drvdata;
-	}
-	*/
-	pushbutton->reg.data = 
-		devm_ioremap_resource(&pdev->dev, ressourceArray[0]);
-	pushbutton->reg.unused = 
-		devm_ioremap_resource(&pdev->dev, ressourceArray[1]);
-	pushbutton->reg.interruptMask = 
-		devm_ioremap_resource(&pdev->dev, ressourceArray[2]);
-	pushbutton->reg.edgeCaputre = 
-		devm_ioremap_resource(&pdev->dev, ressourceArray[3]);
-
-	if (pushbutton->reg.data == NULL) {
+	if (privateData->pushbutton.dataRegister == NULL ||
+		privateData->pushbutton.intrptMaskRegister == NULL ||
+		privateData->pushbutton.edgeCaptureRegister == NULL) {
 		status = -EFAULT;
 		dev_err(&pdev->dev, "Error in ioremap");
 		goto reset_drvdata;
 	}
-	
-	iowrite32(0xffffffff, pushbutton->reg.interruptMask);
+	// set interrupt mask
+	iowrite32(0xf, privateData->pushbutton.intrptMaskRegister);
+	// reset edge capture register
+	iowrite32(0xf, privateData->pushbutton.edgeCaptureRegister);
 
-	pushbutton->pdev = pdev;
+	dev_info(&pdev->dev, "maskreg: %d", ioread32(privateData->pushbutton.intrptMaskRegister));
+	privateData->pdev = pdev;
 
-	snprintf(buf, 15, "pushbutton%d", no);
-	pushbutton->misc.name = buf;
-	pushbutton->misc.minor = MISC_DYNAMIC_MINOR;
-	pushbutton->misc.fops = &fops;
-	pushbutton->misc.parent = &pdev->dev;
-	status = misc_register(&pushbutton->misc);
+	// register character device 
+	snprintf(charDevName, CHARDEV_NAME_LEN, "pushbutton%d", no);
+	privateData->misc.name = charDevName;
+	privateData->misc.minor = MISC_DYNAMIC_MINOR;
+	privateData->misc.fops = &fops;
+	privateData->misc.parent = &pdev->dev;
+	status = misc_register(&privateData->misc);
 	if (status != 0)
 	{
 		dev_err(&pdev->dev, "Error in misc_registers");
@@ -222,18 +248,18 @@ static int pushbutton_probe(struct platform_device *pdev)
 reset_drvdata:
 	platform_set_drvdata(pdev, NULL);
 free_kfifo:
-	kfifo_free(&pushbutton->fifo);
+	kfifo_free(&privateData->fifo);
 exit:
 	return status;
 }
 
 static int pushbutton_remove(struct platform_device *pdev)
 {
-	struct pushbutton_t *pushbutton;
-	pushbutton = platform_get_drvdata(pdev);
-	misc_deregister(&pushbutton->misc);
+	struct pushbutton_t *privateData;
+	privateData = platform_get_drvdata(pdev);
+	misc_deregister(&privateData->misc);
 	platform_set_drvdata(pdev, NULL);
-	kfifo_free(&pushbutton->fifo);
+	kfifo_free(&privateData->fifo);
 	return 0;
 }
 
@@ -248,7 +274,7 @@ MODULE_DEVICE_TABLE(of, pushbutton_of_match);
 //struct led driver
 static struct platform_driver pushbutton_driver = {
 	.driver = {
-		.name = "PUSHBUTTON",
+		.name = "PushButtonDrv",
 		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(pushbutton_of_match)
 	},
