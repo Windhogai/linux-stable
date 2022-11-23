@@ -12,6 +12,7 @@ bldgrn='\e[1;32m' # Green
 bldblu='\e[1;34m' # Blue
 
 LOC="./drivers/misc/"
+DEST="/lib/modules/5.4.69/kernel/drivers/misc/"
 FILETYPE=".ko"
 MODULE=$1
 BOARD=root@$2
@@ -31,9 +32,9 @@ return 1
 fi
 
 echo installing ${MODULE}.ko on ${BOARD}
-scp ${LOC}${MODULE}${FILETYPE} ${BOARD}:~
+scp ${LOC}${MODULE}${FILETYPE} ${BOARD}:${DEST}
 ssh ${BOARD} rmmod ${MODULE}
-ssh ${BOARD} insmod ${MODULE}.ko
+ssh ${BOARD} modprobe ${MODULE}
 if [ $? -eq 0 ];
 then
 echo "${bldgrn}Kernel module installed ${txtwht}"
