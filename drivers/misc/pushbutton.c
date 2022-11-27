@@ -30,7 +30,6 @@
 #define IRQ_NUMBER 40
 
 static const int NO_OF_REGS = 3;
-static const char CHARDEV_NAME[] = "pushbuttonTest";
 
 struct pushbuttonRegisters_t {
 	uint32_t *dataRegister;
@@ -219,11 +218,11 @@ static int pushbutton_probe(struct platform_device *pdev)
 		privateData->pushbutton.intrptMaskRegister == NULL ||
 		privateData->pushbutton.edgeCaptureRegister == NULL) {
 		status = -EFAULT;
-		dev_err(&pdev->dev, "Error in ioremap");
+		dev_err(&pdev->dev, "Error in devm_ioremap_resource");
 		goto reset_drvdata;
 	}
 
-	// set device in private data for (used for error msg)
+	// set device in private data (used for error msg)
 	privateData->pdev = pdev;
 
 	// register character device
@@ -238,7 +237,7 @@ static int pushbutton_probe(struct platform_device *pdev)
 		goto reset_drvdata;
 	}
 
-	// activate all buttons interrupt mask
+	// activate all buttons in interrupt mask
 	iowrite32(0xf, privateData->pushbutton.intrptMaskRegister);
 	// reset edge capture register
 	iowrite32(0xf, privateData->pushbutton.edgeCaptureRegister);
@@ -259,7 +258,7 @@ static int pushbutton_remove(struct platform_device *pdev)
 	struct pushbutton_t *privateData;
 
 	privateData = platform_get_drvdata(pdev);
-	// deactivate all buttons interrupt mask
+	// deactivate all buttons in interrupt mask
 	iowrite32(0x0, privateData->pushbutton.intrptMaskRegister);
 	// reset edge capture register
 	iowrite32(0xf, privateData->pushbutton.edgeCaptureRegister);
@@ -270,7 +269,6 @@ static int pushbutton_remove(struct platform_device *pdev)
 	return 0;
 }
 
-//struct  device_id
 static const struct of_device_id
 	pushbutton_of_match[] = {
 	{ .compatible = "ldd,pushbutton", },
@@ -278,7 +276,6 @@ static const struct of_device_id
 };
 MODULE_DEVICE_TABLE(of, pushbutton_of_match);
 
-//struct led driver
 static struct platform_driver pushbutton_driver = {
 	.driver = {
 		.name = "PushButtonDrv",
