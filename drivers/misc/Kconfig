@@ -496,6 +496,12 @@ config VCPU_STALL_DETECTOR
 
 	  If you do not intend to run this kernel as a guest, say N.
 
+config PUSHBUTTON
+	tristate "pushbutton device driver"
+	help
+	  This driver provides read access to the pushbuttons 0 to 3 on the de1-
+	  soc. The driver is accessible via character device.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
